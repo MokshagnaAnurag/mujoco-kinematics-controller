@@ -1,0 +1,47 @@
+<mujoco model="2dof_arm">
+    <compiler angle="radian"/>
+    <option gravity="0 0 0" timestep="0.01"/>
+    
+    <asset>
+        <material name="arm_mat" rgba="0.8 0.2 0.2 1"/>
+        <material name="target_mat" rgba="0.2 0.8 0.2 1"/>
+    </asset>
+    
+    <worldbody>
+        <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+        <geom name="floor" type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" pos="0 0 -0.1"/>
+        
+        <!-- Target -->
+        <body name="target_body" pos="1.0 1.0 0">
+            <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+            <!-- Free joints allow the target to be moved easily -->
+            <joint name="target_x" type="slide" axis="1 0 0" damping="10"/>
+            <joint name="target_y" type="slide" axis="0 1 0" damping="10"/>
+            <site name="target" pos="0 0 0" type="sphere" size="0.05" material="target_mat"/>
+        </body>
+        
+        <!-- Base of the arm -->
+        <body name="base" pos="0 0 0">
+            <!-- Link 1 -->
+            <body name="link1" pos="0 0 0">
+                <joint name="joint1" type="hinge" axis="0 0 1" damping="0.5"/>
+                <geom type="capsule" fromto="0 0 0 1 0 0" size="0.05" material="arm_mat" mass="1.0"/>
+                
+                <!-- Link 2 -->
+                <body name="link2" pos="1 0 0">
+                    <joint name="joint2" type="hinge" axis="0 0 1" damping="0.5"/>
+                    <geom type="capsule" fromto="0 0 0 1 0 0" size="0.04" material="arm_mat" mass="1.0"/>
+                    
+                    <!-- End effector -->
+                    <site name="end_effector" pos="1 0 0" type="sphere" size="0.06" rgba="0.2 0.2 0.8 1"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    
+    <actuator>
+        <!-- Using velocity actuators for simpler kinematics control first, but we can use motor for torque control -->
+        <velocity joint="joint1" name="vel1" kv="10"/>
+        <velocity joint="joint2" name="vel2" kv="10"/>
+    </actuator>
+</mujoco>
