@@ -15,8 +15,8 @@ This repository contains a MuJoCo simulation of a 2-DOF robot arm that uses a Da
 The project requires a standard Python 3 Linux environment. You can set up the environment and run the experiments using:
 
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone https://github.com/MokshagnaAnurag/mujoco-kinematics-controller.git
+cd mujoco-kinematics-controller
 chmod +x run.sh
 ./run.sh
 ```
