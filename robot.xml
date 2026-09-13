@@ -1,47 +1,71 @@
 <mujoco model="2dof_arm">
-    <compiler angle="radian"/>
-    <option gravity="0 0 0" timestep="0.01"/>
-    
-    <asset>
-        <material name="arm_mat" rgba="0.8 0.2 0.2 1"/>
-        <material name="target_mat" rgba="0.2 0.8 0.2 1"/>
-    </asset>
-    
-    <worldbody>
-        <light pos="0 0 3" dir="0 0 -1" directional="true"/>
-        <geom name="floor" type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" pos="0 0 -0.1"/>
-        
-        <!-- Target -->
-        <body name="target_body" pos="1.0 1.0 0">
-            <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
-            <!-- Free joints allow the target to be moved easily -->
-            <joint name="target_x" type="slide" axis="1 0 0" damping="10"/>
-            <joint name="target_y" type="slide" axis="0 1 0" damping="10"/>
-            <site name="target" pos="0 0 0" type="sphere" size="0.05" material="target_mat"/>
+  <!--
+    Simple planar 2-DOF (2-revolute-joint) robot arm.
+    - Base fixed at origin, arm moves in the XY plane (gravity acts along -Z,
+      arm is oriented so it swings in a horizontal-looking plane on screen but
+      physically rotates about the Z axis, so gravity does not add extra
+      unmodeled torque about the joints -- this keeps the analytical
+      kinematics/dynamics comparisons clean).
+    - Link 1 length L1 = 0.30 m, Link 2 length L2 = 0.25 m.
+    - Both joints are hinge joints rotating about the Z axis.
+    - A small red sphere ("end_effector") marks the tip of link 2.
+    - A green sphere ("target") marks the current target position; it has no
+      collision/physics (mocap body) and is repositioned from Python each
+      episode.
+  -->
+  <compiler angle="radian" coordinate="local" inertiafromgeom="true"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
+
+  <default>
+    <joint damping="0.5" armature="0.01"/>
+    <geom rgba="0.7 0.7 0.75 1" friction="1 0.1 0.1"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.95 0.95 1" rgb2="0.6 0.7 0.9" width="128" height="128"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.85 0.85 0.85" rgb2="0.75 0.75 0.75" width="300" height="300"/>
+    <material name="grid_mat" texture="grid" texrepeat="6 6" reflectance="0.0"/>
+  </asset>
+
+  <worldbody>
+    <light diffuse="0.9 0.9 0.9" pos="0 0 3" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="1.2 1.2 0.02" pos="0 0 -0.05" material="grid_mat"/>
+
+    <!-- Fixed base -->
+    <body name="base" pos="0 0 0">
+      <geom name="base_geom" type="cylinder" size="0.05 0.03" pos="0 0 0" rgba="0.2 0.2 0.2 1"/>
+
+      <!-- Link 1: rotates about Z at the base -->
+      <body name="link1" pos="0 0 0">
+        <joint name="joint1" type="hinge" axis="0 0 1" pos="0 0 0" range="-3.14159 3.14159"/>
+        <geom name="link1_geom" type="capsule" fromto="0 0 0  0.30 0 0" size="0.02" rgba="0.2 0.5 0.9 1"/>
+        <inertial pos="0.15 0 0" mass="0.6" diaginertia="0.001 0.0135 0.0135"/>
+
+        <!-- Link 2: rotates about Z at the end of link 1 -->
+        <body name="link2" pos="0.30 0 0">
+          <joint name="joint2" type="hinge" axis="0 0 1" pos="0 0 0" range="-3.05 3.05"/>
+          <geom name="link2_geom" type="capsule" fromto="0 0 0  0.25 0 0" size="0.018" rgba="0.9 0.5 0.2 1"/>
+          <inertial pos="0.125 0 0" mass="0.4" diaginertia="0.0007 0.0053 0.0053"/>
+
+          <!-- End effector marker at tip of link 2 -->
+          <body name="end_effector" pos="0.25 0 0">
+            <geom name="ee_geom" type="sphere" size="0.02" rgba="0.9 0.1 0.1 1" contype="0" conaffinity="0" mass="0.01"/>
+            <site name="ee_site" pos="0 0 0" size="0.005"/>
+          </body>
         </body>
-        
-        <!-- Base of the arm -->
-        <body name="base" pos="0 0 0">
-            <!-- Link 1 -->
-            <body name="link1" pos="0 0 0">
-                <joint name="joint1" type="hinge" axis="0 0 1" damping="0.5"/>
-                <geom type="capsule" fromto="0 0 0 1 0 0" size="0.05" material="arm_mat" mass="1.0"/>
-                
-                <!-- Link 2 -->
-                <body name="link2" pos="1 0 0">
-                    <joint name="joint2" type="hinge" axis="0 0 1" damping="0.5"/>
-                    <geom type="capsule" fromto="0 0 0 1 0 0" size="0.04" material="arm_mat" mass="1.0"/>
-                    
-                    <!-- End effector -->
-                    <site name="end_effector" pos="1 0 0" type="sphere" size="0.06" rgba="0.2 0.2 0.8 1"/>
-                </body>
-            </body>
-        </body>
-    </worldbody>
-    
-    <actuator>
-        <!-- Using velocity actuators for simpler kinematics control first, but we can use motor for torque control -->
-        <velocity joint="joint1" name="vel1" kv="10"/>
-        <velocity joint="joint2" name="vel2" kv="10"/>
-    </actuator>
+      </body>
+    </body>
+
+    <!-- Target marker: a mocap body so we can move it freely from Python
+         without it being simulated by the physics engine. -->
+    <body name="target" mocap="true" pos="0.3 0.3 0">
+      <geom name="target_geom" type="sphere" size="0.02" rgba="0.1 0.8 0.1 0.6" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="motor1" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-5 5"/>
+    <motor name="motor2" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-5 5"/>
+  </actuator>
 </mujoco>
