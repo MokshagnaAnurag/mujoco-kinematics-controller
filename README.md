@@ -1,10 +1,11 @@
-# ObliviqLabs Robotics Simulation Take-Home Challenge
+# 2-DOF Robot Arm: Simulation, Kinematics, Control and Debugging
 
-This repository contains a complete solution for the ObliviqLabs 2-DOF Robot Arm MuJoCo challenge. It implements a custom physics simulation, manual Forward Kinematics, analytical Jacobians, and a robust Inverse Kinematics controller designed to handle real-world latency and sensor noise.
+A planar 2-DOF (2-revolute-joint) robot arm simulated in MuJoCo, with
+hand-derived forward kinematics and Jacobian, a damped-least-squares
+reaching controller, injected physical faults, and a debugging case
+study that finds and fixes a real closed-loop instability.
 
-## Setup & Execution
-
-The project requires a standard Python 3 Linux environment. You can set up the environment and run the experiments using the provided bash script:
+## Quick start
 
 ```bash
 git clone https://github.com/MokshagnaAnurag/mujoco-kinematics-controller.git
@@ -13,46 +14,323 @@ chmod +x run.sh
 ./run.sh
 ```
 
-Running this script will:
-1. Install requirements (`mujoco`, `numpy`, `matplotlib`).
-2. Run a mathematical verification to prove the manual Jacobian matches MuJoCo.
-3. Launch a live 3D viewer showing the robot reaching 20 targets under Baseline, Degraded, and Fixed conditions.
-4. Save a final performance plot to `results/errors_comparison.png`.
+`run.sh` creates a virtualenv, installs `requirements.txt`, and runs
+`src/experiments.py`, which runs Parts 3, 4 and 5 end-to-end and writes
+plots + a summary to `results/`. Takes about a minute on a normal
+laptop (no GPU needed; MuJoCo runs headless here, no on-screen viewer
+is required).
 
-## 📁 Repository Structure
-* `robot.xml`: MuJoCo MJCF definition of the planar 2-DOF arm and movable target.
-* `src/kinematics.py`: Manual implementation of Forward Kinematics and the Analytical Jacobian.
-* `src/controller.py`: Implementation of the Damped Least-Squares (DLS) Inverse Kinematics controller.
-* `src/simulation.py`: Object-oriented Python wrapper interacting with the MuJoCo C-API.
-* `src/experiments.py`: The main runner. Handles mathematical verification, fault injection (noise/latency), and plotting.
-* `results/`: Directory for output plots.
-* `LEARNING_NOTES.md`: Reflection on challenges, learning, and the Part 5 debugging process.
+To just re-run the Jacobian/FK self-check: `./run.sh kinematics`.
 
-## Controller Design Choice (Part 3)
+### Watching it live (optional, local dev only)
 
-I chose to implement **Damped Least-Squares (DLS) Inverse Kinematics** rather than a standard Jacobian Pseudo-Inverse or Jacobian Transpose. 
-* **Why?** Standard pseudo-inverse methods become mathematically unstable near singularities (e.g., when the 2-DOF arm is fully extended). This causes joint velocity commands to explode toward infinity. DLS introduces a damping factor ($\lambda$) that safely limits joint velocities near singularities, sacrificing a tiny bit of accuracy for massive gains in real-world stability.
+`run.sh visualize` opens an interactive MuJoCo viewer window so you can
+watch the arm reach targets in real time instead of just reading plots.
+It needs a display (won't work headless/over plain SSH) and is completely
+optional for the graded pipeline:
 
----
+```bash
+./run.sh visualize                 # Part 3: baseline controller, random targets
+./run.sh visualize --broken        # Part 4: faults injected
+./run.sh visualize --fixed         # Part 5: hierarchical fix (implies --broken)
+```
 
-## Part 6 - Physical AI Questions
+Each episode resets to the same `q=(0,0)` start pose used in
+`experiments.py`, so what you see live matches the numbers in
+`results/summary.txt` (roughly 100% / ~0-5% / ~85% converged
+respectively). On some Linux desktops (especially Wayland) you may see
+harmless `xkbcommon`/`GLFWError` warnings printed to the terminal when
+the window opens -- these are cosmetic locale/compositor warnings from
+GLFW, not errors; the viewer window still opens and runs normally.
 
-If we were to replace the hand-designed DLS controller with a learned Machine Learning policy, here is how the system would be designed:
+## Repository layout
 
-### Policy Design
-* **Observations:** The policy would consume the current joint angles ($q$), joint velocities ($\dot{q}$), the end effector position ($x_{ee}$), and the relative position vector to the target ($\Delta x$).
-* **Actions:** The network would output Joint velocity commands ($\dot{q}_{cmd}$). While direct motor torques ($\tau$) are often preferred for highly dynamic, deep policies, velocity commands are significantly easier and faster to learn for kinematic reaching tasks.
-* **Training Data:** Data would be generated via Reinforcement Learning (e.g., PPO or SAC algorithm). We would heavily parallelize the MuJoCo simulation, randomizing the target position across the reachable workspace every episode to gather millions of interaction steps.
-* **Evaluation Metrics:** The policy would be evaluated on:
-  1. Success Rate (reaching within a 1cm threshold).
-  2. Convergence time (average steps to target).
-  3. Energy efficiency (integral of squared actions).
-  4. Trajectory smoothness (minimizing jerk).
+```
+project/
+|-- README.md              <- this file
+|-- LEARNING_NOTES.md       <- what I learned / hardest bugs / what I'd improve
+|-- requirements.txt
+|-- run.sh
+|-- robot.xml               <- MuJoCo model (2 revolute joints, 2 links, base, EE, target)
+|-- src/
+|   |-- kinematics.py       <- hand-derived FK + analytical Jacobian (Part 2)
+|   |-- controller.py       <- DLS reaching controller + hierarchical fixed controller (Part 3, 5)
+|   |-- simulation.py       <- MuJoCo wrapper, control loops, fault injection (Part 1, 4)
+|   `-- experiments.py      <- runs Parts 3/4/5, produces results/
+`-- results/                <- plots + summary.txt (generated by run.sh)
+```
 
-### Sim-to-Real Transfer
-* **Randomized Parameters (Domain Randomization):** To prevent the AI from overfitting to a "perfect" simulation, during training I would heavily randomize link masses, link inertias, joint friction (dry and viscous), actuator latency, sensor noise variance, and minor link dimensions.
-* **Most Crucial Inaccuracies:** The most dangerous inaccuracies when transferring to a physical robot are **communication latency** and **unmodeled actuator dynamics** (like deadbands, backlash, or non-linear motor friction). If the policy isn't trained to expect a delay between seeing an observation and the motor actually moving, it will violently oscillate on real hardware.
+## Part 1 - The simulation (`robot.xml` + `simulation.py`)
 
-### Data Collection & Recovery
-* If the policy repeatedly fails in one particular region of the workspace (e.g., a specific corner), I would collect more data by explicitly initializing episodes with the target in and around that specific region. 
-* Crucially, I would also augment this with random start configurations near that region to ensure the policy learns the local recovery dynamics (how to get unstuck) without catastrophically forgetting the rest of the workspace.
+`robot.xml` defines: a fixed base, two hinge joints (`joint1`, `joint2`,
+both rotating about Z so the arm moves in the XY plane), two capsule
+links (`L1 = 0.30 m`, `L2 = 0.25 m`), a small red sphere marking the end
+effector, and a green **mocap** body marking the target (moved freely
+from Python without being simulated by the physics engine, since the
+target isn't a physical object).
+
+The arm is oriented so both joints rotate about the world Z axis while
+gravity also acts along Z. This means gravity contributes **no** torque
+about either joint, so the only relevant dynamics for the FK/Jacobian
+comparison are inertia, damping and the actuator torques we apply -- it
+keeps the hand-derived-vs-MuJoCo comparisons clean and avoids conflating
+"my kinematics is wrong" with "I forgot a gravity term."
+
+`simulation.py`'s `ArmSim` class wraps `mujoco.MjModel`/`MjData` and
+exposes: true and "measured" (possibly noisy) joint state, MuJoCo's own
+end-effector position and Jacobian (used only to *verify* our own
+implementations), target placement, fault-injection toggles, and two
+control-loop runners (`run_control_loop`, `run_hierarchical_control_loop`,
+the latter added for the Part 5 fix).
+
+## Part 2 - Kinematics (`kinematics.py`)
+
+**Forward kinematics** for the standard 2-link planar arm, derived from
+the joint geometry:
+
+```
+x = L1*cos(q1) + L2*cos(q1 + q2)
+y = L1*sin(q1) + L2*sin(q1 + q2)
+```
+
+**Jacobian** (analytical, from differentiating the FK expressions by
+hand -- not computed by calling a library):
+
+```
+J = [ -L1*sin(q1) - L2*sin(q1+q2)   -L2*sin(q1+q2) ]
+    [  L1*cos(q1) + L2*cos(q1+q2)    L2*cos(q1+q2) ]
+```
+
+**How I verified correctness** (three independent checks, all passing):
+
+1. **Finite-difference check.** `kinematics.py`, run standalone
+   (`python3 src/kinematics.py`), samples 1000 random joint
+   configurations and compares the analytical Jacobian against a
+   central-difference numerical Jacobian of `forward_kinematics`. Max
+   discrepancy observed: **~1e-10** (floating-point noise).
+2. **Cross-check against MuJoCo's own kinematics/Jacobian.**
+   `simulation.py` exposes `get_ee_pos_mujoco()` (MuJoCo's site position)
+   and `get_mujoco_jacobian()` (`mj_jacSite`, restricted to the 2 arm
+   joints and the XY plane). Every episode run by `experiments.py`
+   implicitly re-validates this, and it was checked explicitly during
+   development, e.g. at `q=[0.4,0.2]` after a reach:
+   `FK hand: [0.400, 0.200]`, `FK mujoco: [0.400, 0.200]` (to displayed
+   precision) and the two 2x2 Jacobians matched to ~1e-8.
+3. **Closed-loop behavior sanity check.** Because the reaching
+   controller in Part 3 is built entirely on the hand-derived Jacobian
+   and FK (no MuJoCo kinematics calls in the control path), the fact
+   that it successfully drives the end effector to 20/20 random targets
+   (see Part 3 below) is itself strong evidence the FK/Jacobian are
+   correct -- a wrong Jacobian sign or a swapped row/column would make a
+   DLS controller diverge or move in the wrong direction almost
+   immediately, which is not what we observe.
+
+## Part 3 - Reaching controller (`controller.py`, Part 3 section of `experiments.py`)
+
+**Method: damped least-squares (DLS) inverse kinematics**, converted to
+joint torque via a joint-space PD velocity tracker:
+
+```
+v_cmd     = Kp * (target - ee_pos)                          # task-space P term
+qdot_cmd  = J^T (J J^T + lambda^2 I)^-1 v_cmd                # damped pseudo-inverse
+tau       = clip(Kd * (qdot_cmd - qdot_true), -tau_max, tau_max)
+```
+
+**Why DLS over plain transpose or plain pseudo-inverse:**
+
+- *Jacobian transpose* (`tau ~ J^T * F`) is simple and unconditionally
+  stable but converges slowly, and a single gain rarely behaves well
+  both near full extension and near the base.
+- *Plain pseudo-inverse* (`J^+`) converges quickly almost everywhere,
+  but `J` becomes singular at full extension (elbow straight,
+  `q2 = 0` or `pi`) and the pseudo-inverse blows up there -- and full
+  extension is exactly the boundary of the reachable workspace, so
+  random reachable targets frequently land near it.
+- *Damped least squares* interpolates between the two: near-identical to
+  the pseudo-inverse when `J` is well-conditioned, and smoothly bounded
+  (transpose-like) near singularities. This removed the need to
+  hand-tune gains per region of the workspace.
+
+**Results (`results/part3_*`, `results/summary.txt`):** on 20 randomly
+generated reachable targets (sampled uniformly in joint space, then
+mapped through FK -- guarantees reachability by construction, see
+`TwoLinkKinematics.sample_reachable_target`), the baseline controller
+reaches **20/20 (100%)** within a 1 cm threshold, mean final error
+**0.27 mm**, mean convergence time **2.46 s**.
+See `part3_baseline_trajectories.png` (end-effector paths in the
+workspace, with the reachable annulus shown as dashed circles) and
+`part3_baseline_error_curves.png` (error vs. time for all 20 targets).
+
+## Part 4 - Breaking the robot
+
+`ArmSim` (in `simulation.py`) implements fault-injection hooks for
+**all eight** categories listed in the assignment (sensor noise,
+actuator noise, actuator/control latency, lower control frequency,
+incorrect link mass, incorrect joint damping, joint friction, and
+external disturbances) so any combination can be toggled on. Three are
+enabled for this experiment (more than the required two):
+
+1. **Sensor noise**: Gaussian noise (`std = 0.05 rad`, ~2.9°) added to
+   the joint-angle measurement the controller sees (`get_measured_q`);
+   the physics itself still uses the true, noise-free state.
+2. **Lower control frequency**: the controller is only re-evaluated at
+   **50 Hz** instead of the 500 Hz physics rate (`control_hz=50` /
+   `outer_hz=50`); the last torque command is held (zero-order hold)
+   between updates.
+3. **Incorrect joint damping**: the model's joint damping coefficients
+   are scaled to **3x** their true/nominal value
+   (`set_incorrect_joint_damping(3.0)`), simulating a dynamics model
+   that doesn't match the real robot.
+
+**Result: the same controller that got 100% now gets 0/20 (0%).** Mean
+final error jumps from 0.27 mm to **76.1 mm** (median 84.8 mm) -- more
+than an order of magnitude worse, and well outside the 1 cm success
+threshold on every single target. See:
+
+- `results/part4_degraded_trajectories.png` -- almost every trajectory
+  stalls near the arm's fully-extended rest configuration (~0.55, 0)
+  instead of reaching its target.
+- `results/part4_degraded_error_curves.png` -- error plateaus around
+  0.1 m instead of decaying to zero.
+- `results/comparison_baseline_degraded_fixed.png` -- side-by-side
+  success-rate and error-distribution comparison across all three
+  conditions (baseline / degraded / fixed).
+
+This is not "the robot got a bit worse" -- it's qualitatively broken,
+which made it a good candidate to actually debug in Part 5.
+
+## Part 5 - Debugging the failure
+
+**1. What was going wrong?**
+Under the three combined faults, the controller made partial progress
+toward the target and then got stuck, oscillating at a roughly constant
+~0.1 m error instead of converging (confirmed by running for 5x longer
+-- the error plateau does not improve with more time, so this isn't
+"slow convergence").
+
+**2. What did I initially suspect?**
+My first hypothesis was the sensor noise: differentiating/using a noisy
+position measurement every control step seemed like the obvious source
+of jittery, non-converging commands.
+
+**3. How did I test the hypothesis?**
+I re-ran the same target with each of the three faults enabled
+**individually** (keeping the other two at nominal values):
+
+| Fault alone            | Final error |
+|-------------------------|------------:|
+| Sensor noise only        | 2.3 mm      |
+| Wrong damping (3x) only  | 0.04 mm     |
+| Low control rate only    | **112 mm**  |
+
+Sensor noise and wrong damping *alone* barely hurt performance at all --
+the controller was robust to both individually. The low control rate
+*alone* reproduced almost the entire failure. This ruled out my initial
+hypothesis and pointed straight at the 50 Hz update rate.
+
+**4. What turned out to be the actual cause?**
+Looking at the logged torques near steady state, they were **saturating
+and flipping sign every control update** (`[-5, 5] -> [5, -5] -> ...`,
+repeating) rather than settling -- a limit cycle, not simply "slow."
+The root cause: my control loop recomputed torque only every 10 physics
+steps (50 Hz) and then **held that torque command fixed for the entire
+10-step window**, including the joint-velocity-tracking (PD "damping")
+term. That term needs the *current* joint velocity to do its job; when
+it's frozen for up to 20 ms while the joint is actually accelerating
+under an unopposed torque, the effective damping of the control loop
+collapses and the system starts to oscillate and saturate, converging
+to a limit cycle instead of the target.
+
+**5. What did I change?**
+I split the controller into two rates (`HierarchicalDLSController` in
+`controller.py`, driven by `run_hierarchical_control_loop` in
+`simulation.py`):
+- an **outer loop** (DLS inverse kinematics on the filtered, possibly
+  noisy position) that still only updates at 50 Hz, and
+- an **inner loop** (joint-space PD torque tracking of the last
+  `qdot_cmd`) that recomputes **every physics step (500 Hz)** using the
+  always-current true joint velocity.
+
+This mirrors how real robot controllers separate a slow outer
+kinematic/planning loop from a fast inner torque/current loop, and it
+directly targets the mechanism identified in step 4 (the PD term now
+always sees a fresh velocity, even though the kinematic target it's
+tracking only updates slowly). I also kept a light low-pass filter
+(`alpha = 0.15`) on the position measurement feeding the outer loop, to
+address the (secondary, but real) noise contribution found in step 3.
+
+**6. Did the change measurably improve performance?**
+Yes. Same 20 targets, same three faults active:
+
+| Condition | Success rate | Mean final error |
+|---|---:|---:|
+| Baseline (no faults) | 100% (20/20) | 0.27 mm |
+| Degraded (3 faults, original controller) | 0% (0/20) | 76.1 mm |
+| **Fixed (3 faults, hierarchical controller)** | **85% (17/20)** | **11.0 mm** |
+
+See `results/part5_fixed_trajectories.png`,
+`results/part5_fixed_error_curves.png`, and
+`results/comparison_baseline_degraded_fixed.png`. The remaining 3
+failures are all targets very close to the boundary of the reachable
+workspace, where the combination of 3x damping and residual sensor
+noise still leaves too little torque authority within the 6-second
+episode budget -- a reasonable next thing to improve (see
+LEARNING_NOTES.md).
+
+## Part 6 - Short Physical AI question
+
+**Policy design.** Observations: joint angles and velocities `(q, qdot)`
+plus the target position relative to the current end-effector position
+`(target - ee_pos)` (rather than the target in absolute world
+coordinates, so the policy generalizes across the workspace instead of
+memorizing target-specific behavior). Actions: joint torques (or
+target joint velocities, if a lower-level torque tracker is kept, which
+tends to be easier to learn on top of). Training data: on-policy
+rollouts in simulation (e.g. PPO/SAC) against randomly sampled reachable
+targets each episode, since we can generate unlimited labeled
+(state, reward) data in sim, unlike on real hardware. Evaluation
+metrics: final position error, success rate at a fixed threshold,
+time-to-convergence, and smoothness/energy of the resulting torque
+trajectories (a policy that "succeeds" by chattering at the actuator
+limits, as our broken Part-4 controller effectively did, is not
+actually a good policy).
+
+**Sim-to-real.** I'd randomize exactly the kinds of things Part 4 broke
+on purpose: link masses/inertias, joint damping and friction, actuator
+delay/latency, control-loop rate, and sensor noise -- plus motor torque
+limits and any unmodeled backlash. Based on this assignment, the
+inaccuracy that mattered *most* was not sensor noise or a wrong mass
+estimate individually, but **control-loop timing** (rate + latency
+interacting with feedback gains) -- a mismatch there caused an outright
+instability while the other two faults alone were comfortably tolerated.
+That suggests, for this class of controller, sim-to-real transfer
+should prioritize matching (or randomizing over) the real control loop's
+timing characteristics at least as much as its dynamics parameters.
+
+**Data.** If the policy repeatedly failed in one region of the
+workspace, I'd first check whether that region was under-sampled during
+training (e.g. near the reachability boundary, which is exactly where
+our own Part-5 fixed controller still struggles) and, if so, oversample
+targets there. I'd also log the joint torques/velocities in the
+failure region to check for saturation (as we found in Part 5) versus a
+genuine kinematic/dynamic limitation (e.g. approaching a singularity),
+since those call for different fixes (more training data and reward
+shaping vs. a different action parameterization or damping term near
+singular configurations).
+
+## Notes on reproducibility
+
+- All randomness is seeded (`np.random.default_rng` with fixed seeds in
+  `experiments.py` and `ArmSim`). Across two different machines this
+  reproduced the baseline and fixed-controller numbers essentially
+  exactly (e.g. baseline 100% / 0.27 mm both times, fixed 85% / ~11 mm
+  both times). The one number that showed small cross-machine variance
+  was the **degraded** condition (0% success, 1 target at the threshold
+  on one machine vs. 5% / 1-of-20 on another) -- expected, since that
+  configuration is right at a knife's edge (torque saturating in a
+  limit cycle), so tiny floating-point/BLAS differences between machines
+  can occasionally tip one borderline target across the 1 cm success
+  line. The qualitative story (100% -> effectively broken -> 85%) is
+  unaffected either way.
+- No absolute machine-specific paths are used; `run.sh` and `simulation.py`
+  resolve paths relative to the script/file location.
