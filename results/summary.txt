@@ -1,0 +1,18 @@
+Baseline:
+  success rate: 100.0%
+  mean final error (mm): 0.266
+  median final error (mm): 0.013
+  mean convergence time (s, successes only): 2.460
+
+Degraded:
+  success rate: 5.0%
+  mean final error (mm): 76.515
+  median final error (mm): 84.839
+  mean convergence time (s, successes only): 2.660
+
+Fixed:
+  success rate: 85.0%
+  mean final error (mm): 11.316
+  median final error (mm): 2.679
+  mean convergence time (s, successes only): 2.566
+
